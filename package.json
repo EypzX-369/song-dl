@@ -3,7 +3,7 @@
  "version": "1.0.0",
   "description": "A simple Youtube download api",
   "main": "app.js",
-  "type" "module",
+  "type": "module",
   "script": {
     "start": "node ap.js",
     "dev": "nodemon app.js"
