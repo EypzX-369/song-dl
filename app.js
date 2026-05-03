@@ -81,10 +81,6 @@ async function download(videoId) {
 
 app.use(cors());
 
-/**
- * 🔥 MAIN ENDPOINT
- * /api/dl?q=
- */
 app.get("/api/dl", async (req, res) => {
     let { q } = req.query;
 
@@ -98,19 +94,16 @@ app.get("/api/dl", async (req, res) => {
     try {
         let videoId;
 
-        // 🎯 CASE 1: YouTube URL
         if (isYoutube(q)) {
             videoId = extractVideoId(q);
             if (!videoId) throw new Error("Invalid YouTube URL");
         }
 
-        // 🎯 CASE 2: Spotify URL
         else if (isSpotify(q)) {
             const query = await spotifyToQuery(q);
             videoId = await searchYouTube(query);
         }
 
-        // 🎯 CASE 3: Normal search
         else {
             videoId = await searchYouTube(q);
         }
