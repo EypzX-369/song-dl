@@ -2,13 +2,17 @@
 FROM node:18-alpine
 
 # Install Chromium and necessary fonts/libraries for Puppeteer
+# Install Chromium and the core libraries required for it to run on Alpine
 RUN apk add --no-cache \
       chromium \
       nss \
       freetype \
       harfbuzz \
       ca-certificates \
-      ttf-freefont
+      ttf-freefont \
+      libstdc++ \
+      glib \
+      dbus
 
 # Tell Puppeteer to use the installed Chromium instead of downloading one
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
