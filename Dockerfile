@@ -1,13 +1,26 @@
-# Use official Node.js image
+# Use official Node.js image (Alpine version)
 FROM node:18-alpine
+
+# Install Chromium and necessary fonts/libraries for Puppeteer
+RUN apk add --no-cache \
+      chromium \
+      nss \
+      freetype \
+      harfbuzz \
+      ca-certificates \
+      ttf-freefont
+
+# Tell Puppeteer to use the installed Chromium instead of downloading one
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
 
 # Set working directory
 WORKDIR /app
 
-# Copy package files first (better caching)
+# Copy package files
 COPY package*.json ./
 
-# Install dependencies
+# Install dependencies (ensure puppeteer is in your package.json)
 RUN npm install --omit=dev
 
 # Copy rest of the code
