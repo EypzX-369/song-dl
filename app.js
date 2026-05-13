@@ -17,6 +17,8 @@ const getBrowser = async () => {
     if (!browser) {
         browser = await puppeteerExtra.launch({ 
             headless: "new",
+            // This is the key part for Alpine/Docker
+            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium-browser',
             args: [
                 '--no-sandbox', 
                 '--disable-setuid-sandbox',
