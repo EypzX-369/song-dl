@@ -1,7 +1,7 @@
 { 
  "name": "song-dl",
  "version": "1.0.0",
-  "description": "A simple Youtube download api",
+  "description": "A simple Youtube and spotify download api",
   "main": "app.js",
   "type": "module",
   "script": {
