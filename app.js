@@ -36,7 +36,6 @@ const getBrowser = async () => {
     return browser;
 };
 
-// FIX: Removed duplicate 'delay' declaration
 const delay = (ms) => new Promise(r => setTimeout(r, ms));
 
 const headers = {
@@ -87,7 +86,6 @@ async function download(videoId) {
     const body = JSON.stringify({ id: videoId, fileType: "mp3" });
 
     for (let i = 0; i < 12; i++) {
-        // Note: Using global fetch (available in Node 18+)
         const res = await fetch("https://ht.flvto.online/converter", {
             method: "POST",
             headers,
@@ -118,8 +116,7 @@ async function scrapeSpotifyPlaylist(url) {
 
     await page.setRequestInterception(true);
     page.on('request', (req) => {
-        // Optimized: Added 'other' to block tracking/analytics
-        if (['image', 'stylesheet', 'font', 'media', 'other'].includes(req.resourceType())) {
+        if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
             req.abort();
         } else {
             req.continue();
@@ -133,23 +130,17 @@ async function scrapeSpotifyPlaylist(url) {
     });
 
     try {
-        // Optimized: domcontentloaded is much faster than networkidle2
-        await page.goto('https://spotisaver.net/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+        // Reverted to 'networkidle2' for reliability, but kept the asset blocking to save speed
+        await page.goto('https://spotisaver.net/', { waitUntil: 'networkidle2', timeout: 30000 });
         
-        // Optimized: Instant DOM injection instead of typing
-        await page.evaluate((targetUrl) => {
-            const input = document.querySelector('input[type="text"]');
-            if (input) {
-                input.value = targetUrl;
-                input.dispatchEvent(new Event('input', { bubbles: true }));
-            }
-        }, url);
-        
+        // Reverted to .type() because the site requires physical keystrokes to trigger the search script
+        await page.type('input[type="text"]', url, { delay: 20 });
         await page.keyboard.press('Enter');
 
-        for (let i = 0; i < 30; i++) {
+        // Extended polling time for Koyeb's slower network
+        for (let i = 0; i < 40; i++) {
             if (capturedData) break;
-            await delay(300);
+            await delay(500);
         }
 
         if (!capturedData) throw new Error("Failed to intercept data");
@@ -157,10 +148,10 @@ async function scrapeSpotifyPlaylist(url) {
         return {
             info: {
                 type: "playlist",
-                name: capturedData.playlist_info?.name,
-                owner: capturedData.playlist_info?.owner,
-                total_tracks: capturedData.playlist_info?.total_tracks,
-                external_url: capturedData.playlist_info?.external_url,
+                name: capturedData.playlist_info?.name || "Unknown",
+                owner: capturedData.playlist_info?.owner || "Unknown",
+                total_tracks: capturedData.playlist_info?.total_tracks || 0,
+                external_url: capturedData.playlist_info?.external_url || "",
                 images_url: capturedData.playlist_info?.images?.[1]?.url || capturedData.playlist_info?.images?.[0]?.url || ""
             },
             tracks: (capturedData.tracks || []).map(t => ({
@@ -183,11 +174,7 @@ app.get("/api/playlist", async (req, res) => {
 
     try {
         const data = await scrapeSpotifyPlaylist(url);
-        res.json({ 
-            status: true, 
-            creator: "Eypz", 
-            result: data 
-        });
+        res.json({ status: true, creator: "Eypz", result: data });
     } catch (err) {
         res.status(500).json({ status: false, message: err.message });
     }
@@ -201,7 +188,6 @@ app.get("/api/dl", async (req, res) => {
         let videoId;
         if (isYoutube(q)) {
             videoId = extractVideoId(q);
-            if (!videoId) throw new Error("Invalid YouTube URL");
         } else if (isSpotify(q)) {
             const query = await spotifyToQuery(q);
             videoId = await searchYouTube(query);
@@ -210,11 +196,7 @@ app.get("/api/dl", async (req, res) => {
         }
 
         const data = await download(videoId);
-        res.json({
-            status: true,
-            creator: "Eypz",
-            result: data
-        });
+        res.json({ status: true, creator: "Eypz", result: data });
     } catch (err) {
         res.status(500).json({ status: false, message: err.message });
     }
