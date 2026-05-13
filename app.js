@@ -26,7 +26,7 @@ const getBrowser = async () => {
         });
     }
     return browser;
-};*
+};
 
 const delay = (ms) => new Promise(r => setTimeout(r, ms));
 
