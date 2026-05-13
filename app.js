@@ -1,8 +1,6 @@
 import "dotenv/config";
 import express from "express";
-import axios from "axios";
 import cors from "cors";
-import puppeteer from 'puppeteer';
 import puppeteerExtra from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 
@@ -15,7 +13,8 @@ let browser;
 const getBrowser = async () => {
     if (!browser) {
         browser = await puppeteerExtra.launch({ 
-            headless: "new",
+            // 'shell' is the optimized, faster version of headless Chrome
+            headless: 'shell', 
             executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium-browser',
             args: [
                 '--no-sandbox', 
@@ -23,7 +22,7 @@ const getBrowser = async () => {
                 '--disable-dev-shm-usage',
                 '--disable-gpu',
                 '--no-zygote',
-                '--single-process'
+                '--disable-extensions'
             ]
         });
     }
@@ -37,52 +36,66 @@ async function scrapeSpotifyPlaylist(url) {
     const page = await instance.newPage();
     let capturedData = null;
 
-    // --- SPEED OPTIMIZATION: Block heavy assets ---
-    await page.setRequestInterception(true);
-    page.on('request', (req) => {
-        if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
-            req.abort();
-        } else {
-            req.continue();
-        }
-    });
-
-    page.on('response', async (response) => {
-        if (response.url().includes('get_playlist.php')) {
-            try { capturedData = await response.json(); } catch (e) {}
-        }
-    });
-
     try {
-        await page.goto('https://spotisaver.net/', { waitUntil: 'networkidle2', timeout: 30000 });
-        await page.type('input[type="text"]', url, { delay: 10 });
+        // --- SPEED OPTIMIZATION: Aggressive Blocking ---
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+            const type = req.resourceType();
+            if (['image', 'stylesheet', 'font', 'media', 'other'].includes(type)) {
+                req.abort();
+            } else {
+                req.continue();
+            }
+        });
+
+        // Intercept the specific API response
+        page.on('response', async (response) => {
+            if (response.url().includes('get_playlist.php')) {
+                try { capturedData = await response.json(); } catch (e) {}
+            }
+        });
+
+        // 1. Wait for 'domcontentloaded' instead of 'networkidle2' (saves ~5-10s)
+        await page.goto('https://spotisaver.net/', { waitUntil: 'domcontentloaded', timeout: 20000 });
+
+        // 2. Direct DOM injection instead of slow .type() (saves ~2-3s)
+        await page.evaluate((spotifyUrl) => {
+            const input = document.querySelector('input[type="text"]');
+            if (input) {
+                input.value = spotifyUrl;
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+        }, url);
+
+        // 3. Trigger search
         await page.keyboard.press('Enter');
 
-        for (let i = 0; i < 20; i++) {
+        // 4. Tight polling for intercepted data
+        for (let i = 0; i < 30; i++) {
             if (capturedData) break;
-            await delay(500);
+            await delay(300); 
         }
 
-        if (!capturedData) throw new Error("Failed to intercept data");
+        if (!capturedData) throw new Error("Timeout: Failed to intercept Spotify data");
 
-        // --- REFORMATTING JSON ---
         return {
             info: {
                 type: "playlist",
-                name: capturedData.playlist_info.name,
-                owner: capturedData.playlist_info.owner,
-                total_tracks: capturedData.playlist_info.total_tracks,
-                external_url: capturedData.playlist_info.external_url,
-                images_url: capturedData.playlist_info.images?.[1]?.url || capturedData.playlist_info.images?.[0]?.url || ""
+                name: capturedData.playlist_info?.name || "Unknown",
+                owner: capturedData.playlist_info?.owner || "Unknown",
+                total_tracks: capturedData.playlist_info?.total_tracks || 0,
+                external_url: capturedData.playlist_info?.external_url || "",
+                images_url: capturedData.playlist_info?.images?.[1]?.url || capturedData.playlist_info?.images?.[0]?.url || ""
             },
-            tracks: capturedData.tracks.map(t => ({
+            tracks: (capturedData.tracks || []).map(t => ({
                 name: t.name,
-                artist: t.artists.join(', '),
+                artist: Array.isArray(t.artists) ? t.artists.join(', ') : t.artists,
                 id: t.id,
                 share_url: t.external_url
             }))
         };
     } finally {
+        // Ensure page is always closed to prevent memory leaks in Koyeb
         await page.close();
     }
 }
@@ -97,7 +110,7 @@ app.get("/api/playlist", async (req, res) => {
         const data = await scrapeSpotifyPlaylist(url);
         res.json({ 
             status: true, 
-            creator: "Eypz", // Updated creator name
+            creator: "Eypz", 
             result: data 
         });
     } catch (err) {
@@ -106,6 +119,7 @@ app.get("/api/playlist", async (req, res) => {
 });
 
 app.listen(PORT, "0.0.0.0", async () => {
-    console.log(`🚀 Running on http://localhost:${PORT}`);
+    console.log(`🚀 API active on port ${PORT}`);
+    // Pre-warm the browser instance
     await getBrowser(); 
 });
