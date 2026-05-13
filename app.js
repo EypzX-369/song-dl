@@ -2,10 +2,11 @@ import "dotenv/config";
 import express from "express";
 import axios from "axios";
 import cors from "cors";
-import puppeteer from 'puppeteer-extra';
+import puppeteer from 'puppeteer'; // Added direct import
+import puppeteerExtra from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 
-puppeteer.use(StealthPlugin());
+puppeteerExtra.use(StealthPlugin());
 
 const app = express();
 const PORT = process.env.PORT || 8000;
@@ -14,9 +15,14 @@ const PORT = process.env.PORT || 8000;
 let browser;
 const getBrowser = async () => {
     if (!browser) {
-        browser = await puppeteer.launch({ 
+        browser = await puppeteerExtra.launch({ 
             headless: "new",
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
+            args: [
+                '--no-sandbox', 
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu'
+            ]
         });
     }
     return browser;
