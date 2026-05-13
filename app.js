@@ -15,16 +15,25 @@ let browser;
 const getBrowser = async () => {
     if (!browser) {
         browser = await puppeteerExtra.launch({ 
-            headless: "new",
+            headless: 'shell', 
             executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium-browser',
             args: [
                 '--no-sandbox', 
                 '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
+                '--disable-dev-shm-usage', // Critical for Docker/Koyeb
                 '--disable-gpu',
                 '--no-zygote',
-                '--single-process'
+                '--no-first-run',
+                '--disable-extensions',
+                '--disable-software-rasterizer',
+                // REMOVED: '--single-process' (This often causes crashes in Alpine/Docker)
             ]
+        });
+
+        // If the browser disconnects, null out the variable so it can restart
+        browser.on('disconnected', () => {
+            console.log("Browser disconnected. Resetting instance...");
+            browser = null;
         });
     }
     return browser;
