@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 8000;
 // SECURITY CONFIG
 // =======================
 
-const ALLOWED_DOMAIN = "https://dl-song.eypz.in";
+const ALLOWED_DOMAIN = "https://song-dl.eypz.in";
 const ADMIN_API_KEY = "admineypz";
 const JWT_SECRET = process.env.JWT_SECRET || "eypz_super_secret";
 
