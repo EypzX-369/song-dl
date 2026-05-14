@@ -2,398 +2,210 @@ import "dotenv/config";
 import express from "express";
 import axios from "axios";
 import cors from "cors";
-import crypto from "crypto";
-import cookieParser from "cookie-parser";
-import jwt from "jsonwebtoken";
-import rateLimit from "express-rate-limit";
-import puppeteerExtra from "puppeteer-extra";
-import StealthPlugin from "puppeteer-extra-plugin-stealth";
+import puppeteerExtra from 'puppeteer-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 
 puppeteerExtra.use(StealthPlugin());
 
 const app = express();
 const PORT = process.env.PORT || 8000;
 
-// =======================
-// SECURITY CONFIG
-// =======================
+// ─── Allowed Domain ───────────────────────────────────────────────────────────
+const ALLOWED_ORIGIN = "https://song-dl.eypz.in";
 
-const ALLOWED_DOMAIN = "https://song-dl.eypz.in";
-const ADMIN_API_KEY = "admineypz";
-const JWT_SECRET = process.env.JWT_SECRET || "eypz_super_secret";
-
-// =======================
-// TRUST PROXY
-// =======================
-
-app.set("trust proxy", true);
-
-// =======================
-// MIDDLEWARE
-// =======================
-
-app.use(express.json());
-app.use(cookieParser());
-
-app.use(cors({
-    origin: ALLOWED_DOMAIN,
-    credentials: true
-}));
-
-// =======================
-// RATE LIMITER
-// =======================
-
-const limiter = rateLimit({
-    windowMs: 60 * 1000,
-    max: 30,
-    message: {
-        status: false,
-        message: "Too many requests"
-    }
-});
-
-app.use("/api", limiter);
-
-// =======================
-// BLOCKED IPS
-// =======================
-
-const blockedIPs = new Set([
-    // "1.1.1.1"
-]);
-
-// =======================
-// BLOCK BAD TOOLS
-// =======================
-
-const blockedAgents = [
-    "PostmanRuntime",
-    "Insomnia",
-    "curl",
-    "python",
-    "wget"
+// ─── User Agents Pool ─────────────────────────────────────────────────────────
+const USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
 ];
 
-app.use((req, res, next) => {
-    const ua = req.headers["user-agent"] || "";
+const getRandomUA = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 
-    const blocked = blockedAgents.some(v =>
-        ua.toLowerCase().includes(v.toLowerCase())
-    );
+// ─── Cookie Store ─────────────────────────────────────────────────────────────
+const cookieStore = {
+    flvto: null,
+    lastRefreshed: null,
+};
 
-    if (blocked) {
+// ─── Domain Guard Middleware ──────────────────────────────────────────────────
+// ─── Domain Guard Middleware ──────────────────────────────────────────────────
+const domainGuard = (req, res, next) => {
+    const origin = req.headers['origin'];
+    const referer = req.headers['referer'];
+
+    // Allow: no origin at all = server-to-server (curl, Postman, internal)
+    // Block: origin present but NOT from allowed domain
+    if (origin && origin !== ALLOWED_ORIGIN) {
         return res.status(403).json({
             status: false,
-            message: "Client blocked"
+            message: "Forbidden: Access denied."
+        });
+    }
+
+    if (referer && !referer.startsWith(ALLOWED_ORIGIN)) {
+        return res.status(403).json({
+            status: false,
+            message: "Forbidden: Access denied."
         });
     }
 
     next();
-});
+};
 
-// =======================
-// AUTH ROUTE
-// =======================
-
-app.get("/auth", (req, res) => {
-    const origin = req.headers.origin || "";
-    const referer = req.headers.referer || "";
-
-    if (
-        origin !== ALLOWED_DOMAIN &&
-        !referer.startsWith(ALLOWED_DOMAIN)
-    ) {
-        return res.status(403).json({
-            status: false,
-            message: "Unauthorized domain"
-        });
-    }
-
-    const token = jwt.sign(
-        {
-            domain: ALLOWED_DOMAIN,
-            created: Date.now(),
-            random: crypto.randomBytes(16).toString("hex")
-        },
-        JWT_SECRET,
-        {
-            expiresIn: "7d"
+// ─── CORS (strict) ────────────────────────────────────────────────────────────
+app.use(cors({
+    origin: (origin, callback) => {
+        if (!origin || origin === ALLOWED_ORIGIN) {
+            callback(null, true);
+        } else {
+            callback(new Error("CORS: Not allowed"), false);
         }
-    );
+    },
+    methods: ["GET"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true,
+}));
 
-    res.cookie("song_auth", token, {
-        httpOnly: true,
-        secure: true,
-        sameSite: "None",
-        maxAge: 1000 * 60 * 60 * 24 * 7
-    });
+// Apply domain guard to all /api routes
+app.use("/api", domainGuard);
 
-    res.json({
-        status: true,
-        creator: "Eypz",
-        message: "Authenticated"
-    });
-});
-
-// =======================
-// PROTECTION MIDDLEWARE
-// =======================
-
-function protectAPI(req, res, next) {
-
-    const apikey = req.query.apikey;
-
-    // ===================
-    // ADMIN BYPASS
-    // ===================
-
-    if (apikey === ADMIN_API_KEY) {
-        return next();
-    }
-
-    // ===================
-    // IP CHECK
-    // ===================
-
-    const ip =
-        req.headers["cf-connecting-ip"] ||
-        req.headers["x-forwarded-for"] ||
-        req.socket.remoteAddress;
-
-    if (blockedIPs.has(ip)) {
-        return res.status(403).json({
-            status: false,
-            message: "IP blocked"
-        });
-    }
-
-    // ===================
-    // DOMAIN CHECK
-    // ===================
-
-    const origin = req.headers.origin || "";
-    const referer = req.headers.referer || "";
-
-    if (
-        origin !== ALLOWED_DOMAIN &&
-        !referer.startsWith(ALLOWED_DOMAIN)
-    ) {
-        return res.status(403).json({
-            status: false,
-            message: "Invalid origin"
-        });
-    }
-
-    // ===================
-    // CUSTOM HEADER CHECK
-    // ===================
-
-    const customOrigin = req.headers["x-song-origin"];
-
-    if (customOrigin !== "song-dl.eypz.in") {
-        return res.status(403).json({
-            status: false,
-            message: "Invalid headers"
-        });
-    }
-
-    // ===================
-    // COOKIE CHECK
-    // ===================
-
-    const token = req.cookies.song_auth;
-
-    if (!token) {
-        return res.status(401).json({
-            status: false,
-            message: "No auth cookie"
-        });
-    }
-
-    // ===================
-    // JWT VERIFY
-    // ===================
-
-    try {
-        jwt.verify(token, JWT_SECRET);
-        next();
-    } catch {
-        return res.status(401).json({
-            status: false,
-            message: "Invalid token"
-        });
-    }
-}
-
-// =======================
-// PUPPETEER
-// =======================
-
+// ─── Browser ──────────────────────────────────────────────────────────────────
 let browser;
-
 const getBrowser = async () => {
-
     if (!browser) {
-
         browser = await puppeteerExtra.launch({
-            headless: "shell",
-            executablePath:
-                process.env.PUPPETEER_EXECUTABLE_PATH ||
-                "/usr/bin/chromium-browser",
-
+            headless: 'shell',
+            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium-browser',
             args: [
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--no-zygote",
-                "--no-first-run",
-                "--disable-extensions",
-                "--disable-software-rasterizer",
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--no-zygote',
+                '--no-first-run',
+                '--disable-extensions',
+                '--disable-software-rasterizer',
             ]
         });
 
-        browser.on("disconnected", () => {
-            console.log("Browser disconnected");
+        browser.on('disconnected', () => {
+            console.log("Browser disconnected. Resetting instance...");
             browser = null;
         });
     }
-
     return browser;
 };
 
-const delay = (ms) =>
-    new Promise(r => setTimeout(r, ms));
+const delay = (ms) => new Promise(r => setTimeout(r, ms));
 
-// =======================
-// FLVTO HEADERS
-// =======================
+// ─── Cookie Helpers ───────────────────────────────────────────────────────────
 
-const headers = {
+// Refresh flvto cookies using a headless browser visit
+async function refreshFlvtoCookies() {
+    const instance = await getBrowser();
+    const page = await instance.newPage();
+    const ua = getRandomUA();
+    await page.setUserAgent(ua);
+
+    try {
+        await page.goto("https://ht.flvto.online/", {
+            waitUntil: "networkidle2",
+            timeout: 20000,
+        });
+        await delay(1500);
+
+        const cookies = await page.cookies();
+        const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+        cookieStore.flvto = cookieHeader;
+        cookieStore.lastRefreshed = Date.now();
+        console.log("[Cookie] flvto cookies refreshed.");
+    } catch (e) {
+        console.error("[Cookie] Failed to refresh flvto cookies:", e.message);
+    } finally {
+        await page.close();
+    }
+}
+
+// Get cookies, refresh if older than 30 minutes or missing
+async function getFlvtoCookies() {
+    const AGE_LIMIT = 30 * 60 * 1000;
+    if (!cookieStore.flvto || !cookieStore.lastRefreshed || (Date.now() - cookieStore.lastRefreshed > AGE_LIMIT)) {
+        await refreshFlvtoCookies();
+    }
+    return cookieStore.flvto || "";
+}
+
+// ─── Headers Builder ──────────────────────────────────────────────────────────
+const buildHeaders = (cookies = "") => ({
+    "accept": "*/*",
     "accept-encoding": "gzip, deflate, br, zstd",
-    "origin": "https://song-dl.eypz.in",
-    "referer": "https://song-dl.eypz.in/",
-    "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-    "x-song-origin": "dl-song.eypz.in"
-};
+    "accept-language": "en-US,en;q=0.9",
+    "content-type": "application/json",
+    "origin": "https://ht.flvto.online",
+    "referer": "https://ht.flvto.online/",
+    "user-agent": getRandomUA(),
+    ...(cookies ? { "cookie": cookies } : {}),
+});
 
-// =======================
-// HELPERS
-// =======================
-
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 function extractVideoId(input) {
-
     const patterns = [
         /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([^&\n?#]+)/,
         /^([a-zA-Z0-9_-]{11})$/
     ];
-
     for (const p of patterns) {
         const m = input.match(p);
-
-        if (m && m[1]) {
-            return m[1];
-        }
+        if (m && m[1]) return m[1];
     }
-
     return null;
 }
 
-function isSpotify(url) {
-    return url.includes("spotify.com");
-}
-
-function isYoutube(url) {
-    return (
-        url.includes("youtube.com") ||
-        url.includes("youtu.be")
-    );
-}
-
-// =======================
-// SEARCH YOUTUBE
-// =======================
+function isSpotify(url) { return url.includes("spotify.com"); }
+function isYoutube(url) { return url.includes("youtube.com") || url.includes("youtu.be"); }
 
 async function searchYouTube(query) {
-
     const res = await axios.get(
         `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`,
-        {
-            headers: {
-                "user-agent": headers["user-agent"]
-            }
-        }
+        { headers: { "user-agent": getRandomUA() } }
     );
-
     const match = res.data.match(/"videoId":"(.*?)"/);
-
-    if (!match) {
-        throw new Error("No results found");
-    }
-
+    if (!match) throw new Error("No results found");
     return match[1];
 }
 
-// =======================
-// SPOTIFY TITLE
-// =======================
-
 async function spotifyToQuery(url) {
-
     const res = await axios.get(url, {
-        headers
+        headers: { "user-agent": getRandomUA() }
     });
-
-    const titleMatch = res.data.match(
-        /<title>(.*?)<\/title>/i
-    );
-
-    if (!titleMatch) {
-        throw new Error("Spotify parse failed");
-    }
-
-    return titleMatch[1]
-        .replace(/\s*-\s*Spotify/i, "")
-        .trim();
+    const titleMatch = res.data.match(/<title>(.*?)<\/title>/i);
+    if (!titleMatch) throw new Error("Spotify parse failed");
+    return titleMatch[1].replace(/\s*-\s*Spotify/i, "").trim();
 }
 
-// =======================
-// DOWNLOAD
-// =======================
-
+// ─── Downloader (with cookies) ────────────────────────────────────────────────
 async function download(videoId) {
-
-    const body = JSON.stringify({
-        id: videoId,
-        fileType: "mp3"
-    });
+    const body = JSON.stringify({ id: videoId, fileType: "mp3" });
 
     for (let i = 0; i < 12; i++) {
-
-        const res = await fetch(
-            "https://ht.flvto.online/converter",
-            {
-                method: "POST",
-                headers,
-                body
-            }
-        );
+        const cookies = await getFlvtoCookies();
+        const res = await fetch("https://ht.flvto.online/converter", {
+            method: "POST",
+            headers: buildHeaders(cookies),
+            body,
+        });
 
         const json = await res.json();
 
-        if (
-            json.status === "ok" ||
-            json.status === "success"
-        ) {
-
+        if (json.status === "ok" || json.status === "success") {
             return {
                 title: json.title,
-                thumbnail:
-                    `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`,
+                thumbnail: `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`,
                 url: json.link,
-                duration: json.duration
+                duration: json.duration,
             };
         }
 
@@ -403,241 +215,102 @@ async function download(videoId) {
     throw new Error("Timeout");
 }
 
-// =======================
-// SPOTIFY PLAYLIST SCRAPER
-// =======================
-
+// ─── Spotify Playlist Scraper ─────────────────────────────────────────────────
 async function scrapeSpotifyPlaylist(url) {
-
     const instance = await getBrowser();
-
     const page = await instance.newPage();
-
+    const ua = getRandomUA();
+    await page.setUserAgent(ua);
     let capturedData = null;
 
     await page.setRequestInterception(true);
-
-    page.on("request", (req) => {
-
-        if (
-            ["image", "stylesheet", "font", "media"]
-                .includes(req.resourceType())
-        ) {
+    page.on('request', (req) => {
+        if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
             req.abort();
         } else {
             req.continue();
         }
     });
 
-    page.on("response", async (response) => {
-
-        if (
-            response.url().includes("get_playlist.php")
-        ) {
-            try {
-                capturedData = await response.json();
-            } catch {}
+    page.on('response', async (response) => {
+        if (response.url().includes('get_playlist.php')) {
+            try { capturedData = await response.json(); } catch (e) {}
         }
     });
 
     try {
-
-        await page.goto(
-            "https://spotisaver.net/",
-            {
-                waitUntil: "networkidle2",
-                timeout: 30000
-            }
-        );
-
-        await page.type(
-            'input[type="text"]',
-            url,
-            {
-                delay: 20
-            }
-        );
-
-        await page.keyboard.press("Enter");
+        await page.goto('https://spotisaver.net/', { waitUntil: 'networkidle2', timeout: 30000 });
+        await page.type('input[type="text"]', url, { delay: 20 });
+        await page.keyboard.press('Enter');
 
         for (let i = 0; i < 40; i++) {
-
-            if (capturedData) {
-                break;
-            }
-
+            if (capturedData) break;
             await delay(500);
         }
 
-        if (!capturedData) {
-            throw new Error(
-                "Failed to intercept data"
-            );
-        }
+        if (!capturedData) throw new Error("Failed to intercept data");
 
         return {
             info: {
                 type: "playlist",
-                name:
-                    capturedData.playlist_info?.name ||
-                    "Unknown",
-
-                owner:
-                    capturedData.playlist_info?.owner ||
-                    "Unknown",
-
-                total_tracks:
-                    capturedData.playlist_info?.total_tracks ||
-                    0,
-
-                external_url:
-                    capturedData.playlist_info?.external_url ||
-                    "",
-
-                images_url:
-                    capturedData.playlist_info?.images?.[1]?.url ||
-                    capturedData.playlist_info?.images?.[0]?.url ||
-                    ""
+                name: capturedData.playlist_info?.name || "Unknown",
+                owner: capturedData.playlist_info?.owner || "Unknown",
+                total_tracks: capturedData.playlist_info?.total_tracks || 0,
+                external_url: capturedData.playlist_info?.external_url || "",
+                images_url: capturedData.playlist_info?.images?.[1]?.url || capturedData.playlist_info?.images?.[0]?.url || ""
             },
-
-            tracks: (
-                capturedData.tracks || []
-            ).map(t => ({
+            tracks: (capturedData.tracks || []).map(t => ({
                 name: t.name,
-
-                artist: Array.isArray(t.artists)
-                    ? t.artists.join(", ")
-                    : t.artists,
-
+                artist: Array.isArray(t.artists) ? t.artists.join(', ') : t.artists,
                 id: t.id,
                 share_url: t.external_url
             }))
         };
-
     } finally {
         await page.close();
     }
 }
 
-// =======================
-// ROUTES
-// =======================
+// ─── Routes ───────────────────────────────────────────────────────────────────
+app.get('/', (req, res) => res.send('Bot Running'));
 
-app.get("/", (req, res) => {
-    res.send("Bot Running");
+app.get("/api/playlist", async (req, res) => {
+    const { url } = req.query;
+    if (!url) return res.status(400).json({ status: false, message: "URL is required" });
+
+    try {
+        const data = await scrapeSpotifyPlaylist(url);
+        res.json({ status: true, creator: "Eypz", result: data });
+    } catch (err) {
+        res.status(500).json({ status: false, message: err.message });
+    }
 });
 
-// =======================
-// PLAYLIST API
-// =======================
+app.get("/api/dl", async (req, res) => {
+    let { q } = req.query;
+    if (!q) return res.status(400).json({ status: false, message: "Query 'q' is required" });
 
-app.get(
-    "/api/playlist",
-    protectAPI,
-    async (req, res) => {
-
-        const { url } = req.query;
-
-        if (!url) {
-            return res.status(400).json({
-                status: false,
-                message: "URL is required"
-            });
+    try {
+        let videoId;
+        if (isYoutube(q)) {
+            videoId = extractVideoId(q);
+        } else if (isSpotify(q)) {
+            const query = await spotifyToQuery(q);
+            videoId = await searchYouTube(query);
+        } else {
+            videoId = await searchYouTube(q);
         }
 
-        try {
-
-            const data =
-                await scrapeSpotifyPlaylist(url);
-
-            res.json({
-                status: true,
-                creator: "Eypz",
-                result: data
-            });
-
-        } catch (err) {
-
-            res.status(500).json({
-                status: false,
-                message: err.message
-            });
-        }
+        const data = await download(videoId);
+        res.json({ status: true, creator: "Eypz", result: data });
+    } catch (err) {
+        res.status(500).json({ status: false, message: err.message });
     }
-);
+});
 
-// =======================
-// SONG DOWNLOADER API
-// =======================
-
-app.get(
-    "/api/dl",
-    protectAPI,
-    async (req, res) => {
-
-        let { q } = req.query;
-
-        if (!q) {
-            return res.status(400).json({
-                status: false,
-                message: "Query 'q' is required"
-            });
-        }
-
-        try {
-
-            let videoId;
-
-            if (isYoutube(q)) {
-
-                videoId = extractVideoId(q);
-
-            } else if (isSpotify(q)) {
-
-                const query =
-                    await spotifyToQuery(q);
-
-                videoId =
-                    await searchYouTube(query);
-
-            } else {
-
-                videoId =
-                    await searchYouTube(q);
-            }
-
-            const data =
-                await download(videoId);
-
-            res.json({
-                status: true,
-                creator: "Eypz",
-                result: data
-            });
-
-        } catch (err) {
-
-            res.status(500).json({
-                status: false,
-                message: err.message
-            });
-        }
-    }
-);
-
-// =======================
-// START SERVER
-// =======================
-
-app.listen(
-    PORT,
-    "0.0.0.0",
-    async () => {
-
-        console.log(
-            `Running on http://localhost:${PORT}`
-        );
-
-        await getBrowser();
-    }
-);
+// ─── Start ────────────────────────────────────────────────────────────────────
+app.listen(PORT, "0.0.0.0", async () => {
+    console.log(`🚀 Running on http://localhost:${PORT}`);
+    await getBrowser();
+    await refreshFlvtoCookies(); // warm up cookies on startup
+});
