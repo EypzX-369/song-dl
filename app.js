@@ -167,7 +167,9 @@ async function scrapeSpotifyPlaylist(url) {
 }
 
 app.use(cors());
-
+app.get('/', (req, res) => {
+    res.send('Bot Running');
+});
 app.get("/api/playlist", async (req, res) => {
     const { url } = req.query;
     if (!url) return res.status(400).json({ status: false, message: "URL is required" });
