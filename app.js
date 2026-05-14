@@ -191,7 +191,7 @@ function protectAPI(req, res, next) {
 
     const customOrigin = req.headers["x-song-origin"];
 
-    if (customOrigin !== "dl-song.eypz.in") {
+    if (customOrigin !== "song-dl.eypz.in") {
         return res.status(403).json({
             status: false,
             message: "Invalid headers"
@@ -272,8 +272,8 @@ const delay = (ms) =>
 
 const headers = {
     "accept-encoding": "gzip, deflate, br, zstd",
-    "origin": "https://dl-song.eypz.in",
-    "referer": "https://dl-song.eypz.in/",
+    "origin": "https://song-dl.eypz.in",
+    "referer": "https://song-dl.eypz.in/",
     "user-agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
     "x-song-origin": "dl-song.eypz.in"
