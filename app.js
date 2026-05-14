@@ -38,7 +38,6 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 const domainGuard = (req, res, next) => {
     const origin = req.headers["origin"];
     const referer = req.headers["referer"];
-
     if (origin && origin !== ALLOWED_ORIGIN) {
         return res.status(403).json({ status: false, message: "Forbidden: Access denied." });
     }
@@ -52,11 +51,8 @@ const domainGuard = (req, res, next) => {
 app.use(
     cors({
         origin: (origin, callback) => {
-            if (!origin || origin === ALLOWED_ORIGIN) {
-                callback(null, true);
-            } else {
-                callback(new Error("CORS: Not allowed"), false);
-            }
+            if (!origin || origin === ALLOWED_ORIGIN) callback(null, true);
+            else callback(new Error("CORS: Not allowed"), false);
         },
         methods: ["GET"],
         allowedHeaders: ["Content-Type", "Authorization"],
@@ -84,9 +80,8 @@ const getBrowser = async () => {
                 "--disable-software-rasterizer",
             ],
         });
-
         browser.on("disconnected", () => {
-            console.log("Browser disconnected. Resetting instance...");
+            console.log("Browser disconnected. Resetting...");
             browser = null;
         });
     }
@@ -98,7 +93,6 @@ async function refreshFlvtoCookies() {
     const instance = await getBrowser();
     const page = await instance.newPage();
     await page.setUserAgent(getRandomUA());
-
     try {
         await page.goto("https://ht.flvto.online/", { waitUntil: "networkidle2", timeout: 20000 });
         await delay(1500);
@@ -107,15 +101,16 @@ async function refreshFlvtoCookies() {
         cookieStore.lastRefreshed = Date.now();
         console.log("[Cookie] flvto cookies refreshed.");
     } catch (e) {
-        console.error("[Cookie] Failed to refresh flvto cookies:", e.message);
+        console.error("[Cookie] Failed to refresh:", e.message);
     } finally {
         await page.close();
     }
 }
 
-async function getFlvtoCookies() {
+async function getFlvtoCookies(forceRefresh = false) {
     const AGE_LIMIT = 30 * 60 * 1000;
     if (
+        forceRefresh ||
         !cookieStore.flvto ||
         !cookieStore.lastRefreshed ||
         Date.now() - cookieStore.lastRefreshed > AGE_LIMIT
@@ -166,19 +161,20 @@ async function searchYouTube(query) {
         `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`,
         { headers: { "user-agent": getRandomUA() } }
     );
-    const match = res.data.match(/"videoId":"(.*?)"/);
+    const match = res.data.match(/"videoId":"([a-zA-Z0-9_-]{11})"/);
     if (!match) throw new Error("No YouTube results found");
     return match[1];
 }
 
-async function spotifyToQuery(url) {
-    // Strip tracking params (si=...) so Spotify returns the actual track page
-    const cleanUrl = url.split("?")[0];
+// ─── Spotify Metadata ─────────────────────────────────────────────────────────
+// Returns { song, artist } parsed from Spotify's og: meta tags
+async function spotifyToMeta(url) {
+    const cleanUrl = url.split("?")[0]; // strip ?si=... tracking params
 
     const res = await axios.get(cleanUrl, {
         headers: {
-            "user-agent":
-                "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+            // Googlebot UA gets server-rendered HTML with full og: tags
+            "user-agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
             "accept-language": "en-US,en;q=0.9",
             accept: "text/html,application/xhtml+xml",
         },
@@ -187,40 +183,57 @@ async function spotifyToQuery(url) {
 
     const html = res.data;
 
-    // Strategy 1: og:title — "Song Name" and og:description — "Artist · Song · Album"
-    const ogTitle = html.match(/<meta\s+property=["']og:title["']\s+content=["']([^"']+)["']/i);
-    const ogDesc  = html.match(/<meta\s+property=["']og:description["']\s+content=["']([^"']+)["']/i);
+    // Match og:title and og:description in either attribute order
+    const ogTitleMatch =
+        html.match(/property=["']og:title["'][^>]*content=["']([^"']+)["']/i) ||
+        html.match(/content=["']([^"']+)["'][^>]*property=["']og:title["']/i);
 
-    if (ogTitle) {
-        const song = ogTitle[1].trim();
-        // og:description for Spotify tracks is usually "Song · Artist · Album"
-        if (ogDesc) {
-            const parts = ogDesc[1].split("·").map((s) => s.trim()).filter(Boolean);
-            // parts[0] is often the song again, parts[1] is the artist
+    const ogDescMatch =
+        html.match(/property=["']og:description["'][^>]*content=["']([^"']+)["']/i) ||
+        html.match(/content=["']([^"']+)["'][^>]*property=["']og:description["']/i);
+
+    if (ogTitleMatch) {
+        const song = ogTitleMatch[1].trim();
+        if (ogDescMatch) {
+            // og:description format: "Song \u00b7 Artist \u00b7 Album"  (\u00b7 = middle dot)
+            const parts = ogDescMatch[1].split("\u00b7").map((s) => s.trim()).filter(Boolean);
             const artist = parts.length >= 2 ? parts[1] : "";
-            if (artist) return `${song} ${artist}`;
+            if (artist) {
+                console.log(`[Spotify] song="${song}" artist="${artist}"`);
+                return { song, artist };
+            }
         }
-        return song;
+        console.log(`[Spotify] song="${song}" artist="(unknown)"`);
+        return { song, artist: "" };
     }
 
-    // Strategy 2: <title> tag — "Song Name - Artist Name | Spotify"  or  "Song Name - Spotify"
-    const titleTag = html.match(/<title>([^<]+)<\/title>/i);
-    if (titleTag) {
-        return titleTag[1]
-            .replace(/\s*[|\-–]\s*Spotify\s*$/i, "")
+    // Fallback: <title> tag — "Song - Artist | Spotify" or "Song | Spotify"
+    const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
+    if (titleMatch) {
+        const raw = titleMatch[1]
+            .replace(/\s*[|\u2013-]\s*Spotify\s*$/i, "")
             .replace(/\s*on Spotify\s*$/i, "")
             .trim();
+        const dashMatch = raw.match(/^(.+?)\s*[-\u2013]\s*(.+)$/);
+        if (dashMatch) {
+            console.log(`[Spotify] song="${dashMatch[1]}" artist="${dashMatch[2]}" (title fallback)`);
+            return { song: dashMatch[1].trim(), artist: dashMatch[2].trim() };
+        }
+        console.log(`[Spotify] query="${raw}" (title fallback, no artist)`);
+        return { song: raw, artist: "" };
     }
 
     throw new Error("Could not parse Spotify track metadata");
 }
 
-// ─── flvto Downloader ──────────────────────────────────────────────────────────
+// ─── flvto Downloader ─────────────────────────────────────────────────────────
+// On "fail": force-refresh cookies and retry (up to 3 fails before giving up)
 async function download(videoId) {
     const body = JSON.stringify({ id: videoId, fileType: "mp3" });
+    let failCount = 0;
 
-    for (let i = 0; i < 12; i++) {
-        const cookies = await getFlvtoCookies();
+    for (let i = 0; i < 14; i++) {
+        const cookies = await getFlvtoCookies(failCount > 0);
         const res = await fetch("https://ht.flvto.online/converter", {
             method: "POST",
             headers: buildHeaders(cookies),
@@ -228,6 +241,7 @@ async function download(videoId) {
         });
 
         const json = await res.json();
+        console.log(`[flvto] attempt ${i + 1} — status="${json.status}"`);
 
         if (json.status === "ok" || json.status === "success") {
             return {
@@ -238,8 +252,15 @@ async function download(videoId) {
             };
         }
 
-        if (json.status === "fail") throw new Error("Converter reported failure");
+        if (json.status === "fail") {
+            failCount++;
+            if (failCount >= 3) throw new Error("Converter failed after multiple cookie refresh retries");
+            console.log(`[flvto] fail #${failCount} — refreshing cookies and retrying...`);
+            await delay(2000);
+            continue;
+        }
 
+        // "processing" or other pending status — wait and retry
         await delay(4000);
     }
 
@@ -255,13 +276,9 @@ async function scrapeSpotifyPlaylist(url) {
 
     await page.setRequestInterception(true);
     page.on("request", (req) => {
-        if (["image", "stylesheet", "font", "media"].includes(req.resourceType())) {
-            req.abort();
-        } else {
-            req.continue();
-        }
+        if (["image", "stylesheet", "font", "media"].includes(req.resourceType())) req.abort();
+        else req.continue();
     });
-
     page.on("response", async (response) => {
         if (response.url().includes("get_playlist.php")) {
             try { capturedData = await response.json(); } catch (e) {}
@@ -290,8 +307,7 @@ async function scrapeSpotifyPlaylist(url) {
                 external_url: capturedData.playlist_info?.external_url || "",
                 images_url:
                     capturedData.playlist_info?.images?.[1]?.url ||
-                    capturedData.playlist_info?.images?.[0]?.url ||
-                    "",
+                    capturedData.playlist_info?.images?.[0]?.url || "",
             },
             tracks: (capturedData.tracks || []).map((t) => ({
                 name: t.name,
@@ -311,25 +327,16 @@ async function scrapeYouTubePlaylist(url) {
     if (!playlistId) throw new Error("Invalid YouTube playlist URL");
 
     const playlistUrl = `https://www.youtube.com/playlist?list=${playlistId}`;
-
-    const res = await axios.get(playlistUrl, {
-        headers: { "user-agent": getRandomUA() },
-    });
-
+    const res = await axios.get(playlistUrl, { headers: { "user-agent": getRandomUA() } });
     const html = res.data;
 
-    // Extract initial data JSON embedded in the page
     const match = html.match(/var ytInitialData\s*=\s*(\{.+?\});\s*<\/script>/s);
     if (!match) throw new Error("Could not parse YouTube playlist page");
 
     let ytData;
-    try {
-        ytData = JSON.parse(match[1]);
-    } catch (e) {
-        throw new Error("Failed to parse YouTube playlist JSON");
-    }
+    try { ytData = JSON.parse(match[1]); }
+    catch (e) { throw new Error("Failed to parse YouTube playlist JSON"); }
 
-    // Navigate the JSON structure to the playlist contents
     const sidebar = ytData?.sidebar?.playlistSidebarRenderer?.items?.[0]
         ?.playlistSidebarPrimaryInfoRenderer;
 
@@ -343,7 +350,6 @@ async function scrapeYouTubePlaylist(url) {
         ytData?.header?.playlistHeaderRenderer?.ownerText?.runs;
     const owner = ownerRuns?.[0]?.text || "Unknown";
 
-    // Tracks live under contents
     const videoItems =
         ytData?.contents?.twoColumnBrowseResultsRenderer?.tabs?.[0]
             ?.tabRenderer?.content?.sectionListRenderer?.contents?.[0]
@@ -358,22 +364,12 @@ async function scrapeYouTubePlaylist(url) {
             const title = v?.title?.runs?.[0]?.text || v?.title?.simpleText || "Unknown";
             const artist =
                 v?.shortBylineText?.runs?.[0]?.text ||
-                v?.longBylineText?.runs?.[0]?.text ||
-                "Unknown";
-            const duration =
-                v?.lengthText?.simpleText || v?.lengthSeconds || "";
+                v?.longBylineText?.runs?.[0]?.text || "Unknown";
+            const duration = v?.lengthText?.simpleText || v?.lengthSeconds || "";
             const thumbnail =
                 v?.thumbnail?.thumbnails?.slice(-1)?.[0]?.url ||
                 `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`;
-
-            return {
-                name: title,
-                artist,
-                videoId,
-                url: videoId ? `https://www.youtube.com/watch?v=${videoId}` : "",
-                thumbnail,
-                duration,
-            };
+            return { name: title, artist, videoId, url: videoId ? `https://www.youtube.com/watch?v=${videoId}` : "", thumbnail, duration };
         });
 
     const totalTracks =
@@ -408,12 +404,14 @@ app.get("/api/dl", async (req, res) => {
         if (isYoutube(q)) {
             videoId = extractVideoId(q);
             if (!videoId) throw new Error("Invalid YouTube URL");
+
         } else if (isSpotify(q)) {
-            // Remove Spotify tracking params like ?si=... before scraping
-            const cleanQ = q.split("?")[0];
-            const query = await spotifyToQuery(cleanQ);
-            console.log(`[Spotify] Resolved query: "${query}"`);
-            videoId = await searchYouTube(query);
+            const { song, artist } = await spotifyToMeta(q);
+            // "Die With a Smile Lady Gaga" is far more precise than just "Die With a Smile"
+            const searchQuery = artist ? `${song} ${artist}` : song;
+            console.log(`[dl] Spotify resolved -> searching: "${searchQuery}"`);
+            videoId = await searchYouTube(searchQuery);
+
         } else {
             videoId = await searchYouTube(q);
         }
@@ -421,6 +419,7 @@ app.get("/api/dl", async (req, res) => {
         const data = await download(videoId);
         res.json({ status: true, creator: "Eypz", result: data });
     } catch (err) {
+        console.error("[dl] error:", err.message);
         res.status(500).json({ status: false, message: err.message });
     }
 });
@@ -432,7 +431,6 @@ app.get("/api/playlist", async (req, res) => {
 
     try {
         let data;
-
         if (isSpotifyPlaylist(url)) {
             data = await scrapeSpotifyPlaylist(url);
         } else if (isYoutubePlaylist(url)) {
@@ -443,16 +441,16 @@ app.get("/api/playlist", async (req, res) => {
                 message: "URL must be a Spotify playlist or YouTube playlist",
             });
         }
-
         res.json({ status: true, creator: "Eypz", result: data });
     } catch (err) {
+        console.error("[playlist] error:", err.message);
         res.status(500).json({ status: false, message: err.message });
     }
 });
 
 // ─── Start ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, "0.0.0.0", async () => {
-    console.log(`🚀 Running on http://localhost:${PORT}`);
+    console.log(`Running on http://localhost:${PORT}`);
     await getBrowser();
     await refreshFlvtoCookies();
 });
