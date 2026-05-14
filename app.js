@@ -32,19 +32,24 @@ const cookieStore = {
 };
 
 // ─── Domain Guard Middleware ──────────────────────────────────────────────────
+// ─── Domain Guard Middleware ──────────────────────────────────────────────────
 const domainGuard = (req, res, next) => {
     const origin = req.headers['origin'];
     const referer = req.headers['referer'];
-    const host = req.headers['host'];
 
-    // Allow direct server-to-server (no origin/referer) only if host matches
-    const originOk = !origin || origin === ALLOWED_ORIGIN;
-    const refererOk = !referer || referer.startsWith(ALLOWED_ORIGIN);
-
-    if (!originOk || !refererOk) {
+    // Allow: no origin at all = server-to-server (curl, Postman, internal)
+    // Block: origin present but NOT from allowed domain
+    if (origin && origin !== ALLOWED_ORIGIN) {
         return res.status(403).json({
             status: false,
-            message: "Forbidden: Access denied. Only requests from download.eypz.in are allowed."
+            message: "Forbidden: Access denied."
+        });
+    }
+
+    if (referer && !referer.startsWith(ALLOWED_ORIGIN)) {
+        return res.status(403).json({
+            status: false,
+            message: "Forbidden: Access denied."
         });
     }
 
