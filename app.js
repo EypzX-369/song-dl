@@ -2,6 +2,8 @@ import "dotenv/config";
 import express from "express";
 import axios from "axios";
 import cors from "cors";
+import crypto from "crypto";
+import cookieParser from "cookie-parser";
 import puppeteerExtra from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 
@@ -10,71 +12,128 @@ puppeteerExtra.use(StealthPlugin());
 const app = express();
 const PORT = process.env.PORT || 8000;
 
-// ─── Allowed Domain ───────────────────────────────────────────────────────────
-const ALLOWED_ORIGIN = "https://song-dl.eypz.in";
+const ALLOWED_DOMAIN = "https://song-dl.eypz.in";
+const ADMIN_API_KEY = "admineypz";
 
-// ─── User Agents Pool ─────────────────────────────────────────────────────────
-const USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
-];
+app.use(express.json());
+app.use(cookieParser());
 
-const getRandomUA = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+app.use(cors({
+    origin: ALLOWED_DOMAIN,
+    credentials: true
+}));
 
-// ─── Cookie Store ─────────────────────────────────────────────────────────────
-const cookieStore = {
-    flvto: null,
-    lastRefreshed: null,
-};
+// =========================
+// COOKIE TOKEN SYSTEM
+// =========================
 
-// ─── Domain Guard Middleware ──────────────────────────────────────────────────
-// ─── Domain Guard Middleware ──────────────────────────────────────────────────
-const domainGuard = (req, res, next) => {
-    const origin = req.headers['origin'];
-    const referer = req.headers['referer'];
+const validTokens = new Set();
 
-    // Allow: no origin at all = server-to-server (curl, Postman, internal)
-    // Block: origin present but NOT from allowed domain
-    if (origin && origin !== ALLOWED_ORIGIN) {
+function generateToken() {
+    return crypto.randomBytes(32).toString("hex");
+}
+
+// Create auth cookie
+app.get("/auth", (req, res) => {
+    const origin = req.headers.origin;
+    const referer = req.headers.referer || "";
+
+    if (
+        origin !== ALLOWED_DOMAIN &&
+        !referer.startsWith(ALLOWED_DOMAIN)
+    ) {
         return res.status(403).json({
             status: false,
-            message: "Forbidden: Access denied."
+            message: "Unauthorized domain"
         });
     }
 
-    if (referer && !referer.startsWith(ALLOWED_ORIGIN)) {
+    const token = generateToken();
+
+    validTokens.add(token);
+
+    res.cookie("song_auth", token, {
+        httpOnly: true,
+        secure: true,
+        sameSite: "None",
+        maxAge: 1000 * 60 * 60 * 24 * 7
+    });
+
+    res.json({
+        status: true,
+        message: "Authenticated"
+    });
+});
+
+// =========================
+// API PROTECTION
+// =========================
+
+function protectAPI(req, res, next) {
+    const apikey = req.query.apikey;
+
+    // Admin bypass
+    if (apikey === ADMIN_API_KEY) {
+        return next();
+    }
+
+    const origin = req.headers.origin;
+    const referer = req.headers.referer || "";
+
+    // Block other domains
+    if (
+        origin !== ALLOWED_DOMAIN &&
+        !referer.startsWith(ALLOWED_DOMAIN)
+    ) {
         return res.status(403).json({
             status: false,
-            message: "Forbidden: Access denied."
+            message: "Access denied"
+        });
+    }
+
+    // Validate cookie
+    const token = req.cookies.song_auth;
+
+    if (!token || !validTokens.has(token)) {
+        return res.status(401).json({
+            status: false,
+            message: "Invalid cookie"
         });
     }
 
     next();
-};
+}
 
-// ─── CORS (strict) ────────────────────────────────────────────────────────────
-app.use(cors({
-    origin: (origin, callback) => {
-        if (!origin || origin === ALLOWED_ORIGIN) {
-            callback(null, true);
-        } else {
-            callback(new Error("CORS: Not allowed"), false);
-        }
-    },
-    methods: ["GET"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-    credentials: true,
-}));
+// =========================
+// BLOCK TOOLS
+// =========================
 
-// Apply domain guard to all /api routes
-app.use("/api", domainGuard);
+const blockedAgents = [
+    "PostmanRuntime",
+    "Insomnia"
+];
 
-// ─── Browser ──────────────────────────────────────────────────────────────────
+app.use((req, res, next) => {
+    const ua = req.headers["user-agent"] || "";
+
+    const blocked = blockedAgents.some(v => ua.includes(v));
+
+    if (blocked) {
+        return res.status(403).json({
+            status: false,
+            message: "Tool blocked"
+        });
+    }
+
+    next();
+});
+
+// =========================
+// PUPPETEER
+// =========================
+
 let browser;
+
 const getBrowser = async () => {
     if (!browser) {
         browser = await puppeteerExtra.launch({
@@ -97,105 +156,79 @@ const getBrowser = async () => {
             browser = null;
         });
     }
+
     return browser;
 };
 
 const delay = (ms) => new Promise(r => setTimeout(r, ms));
 
-// ─── Cookie Helpers ───────────────────────────────────────────────────────────
-
-// Refresh flvto cookies using a headless browser visit
-async function refreshFlvtoCookies() {
-    const instance = await getBrowser();
-    const page = await instance.newPage();
-    const ua = getRandomUA();
-    await page.setUserAgent(ua);
-
-    try {
-        await page.goto("https://ht.flvto.online/", {
-            waitUntil: "networkidle2",
-            timeout: 20000,
-        });
-        await delay(1500);
-
-        const cookies = await page.cookies();
-        const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-        cookieStore.flvto = cookieHeader;
-        cookieStore.lastRefreshed = Date.now();
-        console.log("[Cookie] flvto cookies refreshed.");
-    } catch (e) {
-        console.error("[Cookie] Failed to refresh flvto cookies:", e.message);
-    } finally {
-        await page.close();
-    }
-}
-
-// Get cookies, refresh if older than 30 minutes or missing
-async function getFlvtoCookies() {
-    const AGE_LIMIT = 30 * 60 * 1000;
-    if (!cookieStore.flvto || !cookieStore.lastRefreshed || (Date.now() - cookieStore.lastRefreshed > AGE_LIMIT)) {
-        await refreshFlvtoCookies();
-    }
-    return cookieStore.flvto || "";
-}
-
-// ─── Headers Builder ──────────────────────────────────────────────────────────
-const buildHeaders = (cookies = "") => ({
-    "accept": "*/*",
+const headers = {
     "accept-encoding": "gzip, deflate, br, zstd",
-    "accept-language": "en-US,en;q=0.9",
-    "content-type": "application/json",
     "origin": "https://ht.flvto.online",
-    "referer": "https://ht.flvto.online/",
-    "user-agent": getRandomUA(),
-    ...(cookies ? { "cookie": cookies } : {}),
-});
+};
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 function extractVideoId(input) {
     const patterns = [
         /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([^&\n?#]+)/,
         /^([a-zA-Z0-9_-]{11})$/
     ];
+
     for (const p of patterns) {
         const m = input.match(p);
         if (m && m[1]) return m[1];
     }
+
     return null;
 }
 
-function isSpotify(url) { return url.includes("spotify.com"); }
-function isYoutube(url) { return url.includes("youtube.com") || url.includes("youtu.be"); }
+function isSpotify(url) {
+    return url.includes("spotify.com");
+}
+
+function isYoutube(url) {
+    return url.includes("youtube.com") || url.includes("youtu.be");
+}
 
 async function searchYouTube(query) {
     const res = await axios.get(
         `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`,
-        { headers: { "user-agent": getRandomUA() } }
+        {
+            headers: {
+                "user-agent": "Mozilla/5.0"
+            }
+        }
     );
+
     const match = res.data.match(/"videoId":"(.*?)"/);
+
     if (!match) throw new Error("No results found");
+
     return match[1];
 }
 
 async function spotifyToQuery(url) {
-    const res = await axios.get(url, {
-        headers: { "user-agent": getRandomUA() }
-    });
+    const res = await axios.get(url);
+
     const titleMatch = res.data.match(/<title>(.*?)<\/title>/i);
+
     if (!titleMatch) throw new Error("Spotify parse failed");
-    return titleMatch[1].replace(/\s*-\s*Spotify/i, "").trim();
+
+    return titleMatch[1]
+        .replace(/\s*-\s*Spotify/i, "")
+        .trim();
 }
 
-// ─── Downloader (with cookies) ────────────────────────────────────────────────
 async function download(videoId) {
-    const body = JSON.stringify({ id: videoId, fileType: "mp3" });
+    const body = JSON.stringify({
+        id: videoId,
+        fileType: "mp3"
+    });
 
     for (let i = 0; i < 12; i++) {
-        const cookies = await getFlvtoCookies();
         const res = await fetch("https://ht.flvto.online/converter", {
             method: "POST",
-            headers: buildHeaders(cookies),
-            body,
+            headers,
+            body
         });
 
         const json = await res.json();
@@ -205,7 +238,7 @@ async function download(videoId) {
                 title: json.title,
                 thumbnail: `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`,
                 url: json.link,
-                duration: json.duration,
+                duration: json.duration
             };
         }
 
@@ -215,17 +248,20 @@ async function download(videoId) {
     throw new Error("Timeout");
 }
 
-// ─── Spotify Playlist Scraper ─────────────────────────────────────────────────
 async function scrapeSpotifyPlaylist(url) {
     const instance = await getBrowser();
+
     const page = await instance.newPage();
-    const ua = getRandomUA();
-    await page.setUserAgent(ua);
+
     let capturedData = null;
 
     await page.setRequestInterception(true);
+
     page.on('request', (req) => {
-        if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
+        if (
+            ['image', 'stylesheet', 'font', 'media']
+                .includes(req.resourceType())
+        ) {
             req.abort();
         } else {
             req.continue();
@@ -234,13 +270,22 @@ async function scrapeSpotifyPlaylist(url) {
 
     page.on('response', async (response) => {
         if (response.url().includes('get_playlist.php')) {
-            try { capturedData = await response.json(); } catch (e) {}
+            try {
+                capturedData = await response.json();
+            } catch (e) {}
         }
     });
 
     try {
-        await page.goto('https://spotisaver.net/', { waitUntil: 'networkidle2', timeout: 30000 });
-        await page.type('input[type="text"]', url, { delay: 20 });
+        await page.goto('https://spotisaver.net/', {
+            waitUntil: 'networkidle2',
+            timeout: 30000
+        });
+
+        await page.type('input[type="text"]', url, {
+            delay: 20
+        });
+
         await page.keyboard.press('Enter');
 
         for (let i = 0; i < 40; i++) {
@@ -248,7 +293,9 @@ async function scrapeSpotifyPlaylist(url) {
             await delay(500);
         }
 
-        if (!capturedData) throw new Error("Failed to intercept data");
+        if (!capturedData) {
+            throw new Error("Failed to intercept data");
+        }
 
         return {
             info: {
@@ -257,11 +304,17 @@ async function scrapeSpotifyPlaylist(url) {
                 owner: capturedData.playlist_info?.owner || "Unknown",
                 total_tracks: capturedData.playlist_info?.total_tracks || 0,
                 external_url: capturedData.playlist_info?.external_url || "",
-                images_url: capturedData.playlist_info?.images?.[1]?.url || capturedData.playlist_info?.images?.[0]?.url || ""
+                images_url:
+                    capturedData.playlist_info?.images?.[1]?.url ||
+                    capturedData.playlist_info?.images?.[0]?.url ||
+                    ""
             },
+
             tracks: (capturedData.tracks || []).map(t => ({
                 name: t.name,
-                artist: Array.isArray(t.artists) ? t.artists.join(', ') : t.artists,
+                artist: Array.isArray(t.artists)
+                    ? t.artists.join(', ')
+                    : t.artists,
                 id: t.id,
                 share_url: t.external_url
             }))
@@ -271,27 +324,55 @@ async function scrapeSpotifyPlaylist(url) {
     }
 }
 
-// ─── Routes ───────────────────────────────────────────────────────────────────
-app.get('/', (req, res) => res.send('Bot Running'));
+// =========================
+// ROUTES
+// =========================
 
-app.get("/api/playlist", async (req, res) => {
+app.get('/', (req, res) => {
+    res.send('Bot Running');
+});
+
+// Protected playlist API
+app.get("/api/playlist", protectAPI, async (req, res) => {
     const { url } = req.query;
-    if (!url) return res.status(400).json({ status: false, message: "URL is required" });
+
+    if (!url) {
+        return res.status(400).json({
+            status: false,
+            message: "URL is required"
+        });
+    }
 
     try {
         const data = await scrapeSpotifyPlaylist(url);
-        res.json({ status: true, creator: "Eypz", result: data });
+
+        res.json({
+            status: true,
+            creator: "Eypz",
+            result: data
+        });
     } catch (err) {
-        res.status(500).json({ status: false, message: err.message });
+        res.status(500).json({
+            status: false,
+            message: err.message
+        });
     }
 });
 
-app.get("/api/dl", async (req, res) => {
+// Protected downloader API
+app.get("/api/dl", protectAPI, async (req, res) => {
     let { q } = req.query;
-    if (!q) return res.status(400).json({ status: false, message: "Query 'q' is required" });
+
+    if (!q) {
+        return res.status(400).json({
+            status: false,
+            message: "Query 'q' is required"
+        });
+    }
 
     try {
         let videoId;
+
         if (isYoutube(q)) {
             videoId = extractVideoId(q);
         } else if (isSpotify(q)) {
@@ -302,15 +383,21 @@ app.get("/api/dl", async (req, res) => {
         }
 
         const data = await download(videoId);
-        res.json({ status: true, creator: "Eypz", result: data });
+
+        res.json({
+            status: true,
+            creator: "Eypz",
+            result: data
+        });
     } catch (err) {
-        res.status(500).json({ status: false, message: err.message });
+        res.status(500).json({
+            status: false,
+            message: err.message
+        });
     }
 });
 
-// ─── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, "0.0.0.0", async () => {
-    console.log(`🚀 Running on http://localhost:${PORT}`);
+    console.log(`Running on http://localhost:${PORT}`);
     await getBrowser();
-    await refreshFlvtoCookies(); // warm up cookies on startup
 });
