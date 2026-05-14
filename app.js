@@ -172,10 +172,47 @@ async function searchYouTube(query) {
 }
 
 async function spotifyToQuery(url) {
-    const res = await axios.get(url, { headers: { "user-agent": getRandomUA() } });
-    const titleMatch = res.data.match(/<title>(.*?)<\/title>/i);
-    if (!titleMatch) throw new Error("Spotify parse failed");
-    return titleMatch[1].replace(/\s*-\s*Spotify/i, "").trim();
+    // Strip tracking params (si=...) so Spotify returns the actual track page
+    const cleanUrl = url.split("?")[0];
+
+    const res = await axios.get(cleanUrl, {
+        headers: {
+            "user-agent":
+                "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+            "accept-language": "en-US,en;q=0.9",
+            accept: "text/html,application/xhtml+xml",
+        },
+        maxRedirects: 5,
+    });
+
+    const html = res.data;
+
+    // Strategy 1: og:title — "Song Name" and og:description — "Artist · Song · Album"
+    const ogTitle = html.match(/<meta\s+property=["']og:title["']\s+content=["']([^"']+)["']/i);
+    const ogDesc  = html.match(/<meta\s+property=["']og:description["']\s+content=["']([^"']+)["']/i);
+
+    if (ogTitle) {
+        const song = ogTitle[1].trim();
+        // og:description for Spotify tracks is usually "Song · Artist · Album"
+        if (ogDesc) {
+            const parts = ogDesc[1].split("·").map((s) => s.trim()).filter(Boolean);
+            // parts[0] is often the song again, parts[1] is the artist
+            const artist = parts.length >= 2 ? parts[1] : "";
+            if (artist) return `${song} ${artist}`;
+        }
+        return song;
+    }
+
+    // Strategy 2: <title> tag — "Song Name - Artist Name | Spotify"  or  "Song Name - Spotify"
+    const titleTag = html.match(/<title>([^<]+)<\/title>/i);
+    if (titleTag) {
+        return titleTag[1]
+            .replace(/\s*[|\-–]\s*Spotify\s*$/i, "")
+            .replace(/\s*on Spotify\s*$/i, "")
+            .trim();
+    }
+
+    throw new Error("Could not parse Spotify track metadata");
 }
 
 // ─── flvto Downloader ──────────────────────────────────────────────────────────
@@ -372,7 +409,10 @@ app.get("/api/dl", async (req, res) => {
             videoId = extractVideoId(q);
             if (!videoId) throw new Error("Invalid YouTube URL");
         } else if (isSpotify(q)) {
-            const query = await spotifyToQuery(q);
+            // Remove Spotify tracking params like ?si=... before scraping
+            const cleanQ = q.split("?")[0];
+            const query = await spotifyToQuery(cleanQ);
+            console.log(`[Spotify] Resolved query: "${query}"`);
             videoId = await searchYouTube(query);
         } else {
             videoId = await searchYouTube(q);
